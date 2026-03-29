@@ -697,6 +697,171 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("keeps linear books free of interactive branch metadata during normal writing", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        title: "线性章节",
+        content: "这是一本道路线性书的第一章。",
+        wordCount: "这是一本道路线性书的第一章。".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        title: "线性章节",
+        content: "这是一本道路线性书的第一章。",
+        wordCount: "这是一本道路线性书的第一章。".length,
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId, 220);
+      await expect(state.loadBranchTree(bookId)).resolves.toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("completes the interactive flow across write, choose, and next-branch write", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const baseBook = await state.loadBookConfig(bookId);
+    await state.saveBookConfig(bookId, {
+      ...baseBook,
+      narrativeMode: "interactive-tree",
+    });
+    await state.ensureInteractiveTree(bookId);
+
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter");
+    writeChapter
+      .mockResolvedValueOnce(
+        createWriterOutput({
+          chapterNumber: 1,
+          title: "章一",
+          content: "第一章结束，林越必须在交易和潜入之间做选择。",
+          wordCount: "第一章结束，林越必须在交易和潜入之间做选择。".length,
+        }),
+      )
+      .mockResolvedValueOnce(
+        createWriterOutput({
+          chapterNumber: 2,
+          title: "章二",
+          content: "第二章沿着被选中的分支继续推进。",
+          wordCount: "第二章沿着被选中的分支继续推进。".length,
+        }),
+      );
+
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    const analyzeChapter = vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter");
+    analyzeChapter
+      .mockResolvedValueOnce(
+        createAnalyzedOutput({
+          title: "章一",
+          content: "第一章结束，林越必须在交易和潜入之间做选择。",
+          wordCount: "第一章结束，林越必须在交易和潜入之间做选择。".length,
+          chapterSummary: "| 1 | 章一 | 林越 | 形成分叉 | 压力升高 | 看守线推进 | 紧张 | 分叉章 |",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAnalyzedOutput({
+          title: "章二",
+          content: "第二章沿着被选中的分支继续推进。",
+          wordCount: "第二章沿着被选中的分支继续推进。".length,
+          chapterSummary: "| 2 | 章二 | 林越 | 进入选中的分支 | 风险抬高 | 交易线推进 | 压迫 | 推进章 |",
+        }),
+      );
+    const generateChoices = vi.spyOn(ChoiceGeneratorAgent.prototype, "generateChoices");
+    generateChoices
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            label: "接受交易",
+            intent: "借助看守进入档案室。",
+            immediateGoal: "今晚进入档案室。",
+            expectedCost: "欠下一笔人情。",
+            expectedRisk: "后续会被监视。",
+            hookPressure: "看守线推进。",
+            characterPressure: "同伴信任下降。",
+            tone: "紧张",
+          },
+          {
+            label: "绕路潜入",
+            intent: "拒绝交易，自己潜入。",
+            immediateGoal: "避开看守进入档案室。",
+            expectedCost: "失去最快入口。",
+            expectedRisk: "暴露概率升高。",
+            hookPressure: "主线推进变慢。",
+            characterPressure: "主角独自承担压力。",
+            tone: "压迫",
+          },
+        ],
+        tokenUsage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            label: "继续深入",
+            intent: "沿当前分支继续压深风险。",
+            immediateGoal: "拿到更核心的档案。",
+            expectedCost: "进一步透支人情。",
+            expectedRisk: "更容易暴露。",
+            hookPressure: "交易线持续推进。",
+            characterPressure: "同伴关系进一步紧绷。",
+            tone: "紧张",
+          },
+          {
+            label: "先撤再谋",
+            intent: "在风险爆开前先撤离。",
+            immediateGoal: "保住已经拿到的线索。",
+            expectedCost: "错过继续推进的窗口。",
+            expectedRisk: "对手有时间反应。",
+            hookPressure: "主线暂时停顿。",
+            characterPressure: "主角承认自己的犹豫。",
+            tone: "克制",
+          },
+        ],
+        tokenUsage: ZERO_USAGE,
+      });
+    vi.spyOn(ChoiceAuditor.prototype, "auditChoices").mockImplementation(async ({ choices }) => ({
+      passed: true,
+      issues: [],
+      choices,
+    }));
+
+    try {
+      const chapter1 = await runner.writeNextChapter(bookId, 220);
+      expect(chapter1.chapterNumber).toBe(1);
+
+      const chooseResult = await runner.chooseInteractiveBranch(bookId, "choice-root-1-1");
+      expect(chooseResult.activeNodeId).toBe("root-1-a");
+
+      const chapter2 = await runner.writeNextChapter(bookId, 220);
+      expect(chapter2.chapterNumber).toBe(2);
+
+      const tree = await state.loadBranchTree(bookId);
+      expect(tree?.activeNodeId).toBe("root-1-a");
+      expect(tree?.nodes.find((node) => node.nodeId === "root-1-a")?.status).toBe("awaiting-choice");
+      expect(tree?.nodes.find((node) => node.nodeId === "root-1-a")?.chapterIds).toEqual(["ch-0002"]);
+      expect(tree?.choices.filter((choice) => choice.fromNodeId === "root-1-a")).toHaveLength(2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps missing control documents for legacy books before writing", async () => {
     const { root, runner, bookId } = await createRunnerFixture();
 

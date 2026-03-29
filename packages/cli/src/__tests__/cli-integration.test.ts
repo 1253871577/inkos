@@ -474,6 +474,32 @@ describe("CLI integration", () => {
       await expect(readFile(join(storyDir, "current_state.md"), "utf-8"))
         .resolves.toContain("Root snapshot.");
     });
+
+    it("rejects branch commands cleanly for linear books", async () => {
+      const bookDir = join(projectDir, "books", "linear-branch-book");
+      await mkdir(join(bookDir, "chapters"), { recursive: true });
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: "linear-branch-book",
+          title: "Linear Branch Book",
+          platform: "other",
+          genre: "other",
+          status: "active",
+          targetChapters: 10,
+          chapterWordCount: 2200,
+          narrativeMode: "linear",
+          createdAt: "2026-03-30T00:00:00.000Z",
+          updatedAt: "2026-03-30T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      );
+      await writeFile(join(bookDir, "chapters", "index.json"), "[]", "utf-8");
+
+      const result = runStderr(["branch", "tree", "linear-branch-book"]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("not an interactive-tree book");
+    });
   });
 
   describe("inkos status", () => {
