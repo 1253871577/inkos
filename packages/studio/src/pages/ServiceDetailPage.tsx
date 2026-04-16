@@ -96,19 +96,33 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
     return () => { cancelled = true; };
   }, [isCustom, persistedCustomName, serviceId]);
 
-  // Load models on mount if connected
+  // Verify connection on mount if key exists — uses /test to validate key, not just /models
   useEffect(() => {
-    if (svc?.connected) {
+    if (!svc?.connected) return;
+    let cancelled = false;
+    void (async () => {
       setStatus({ state: "testing" });
-      fetchJson<{ models: ModelInfo[] }>(`/services/${encodeURIComponent(serviceId)}/models`)
-        .then((data) => {
-          const models = data.models ?? [];
-          setStatus(models.length > 0
-            ? { state: "connected", models }
-            : { state: "idle" });
-        })
-        .catch(() => setStatus({ state: "idle" }));
-    }
+      try {
+        // Load saved key first
+        const secretData = await fetchJson<{ apiKey?: string }>(`/services/${encodeURIComponent(effectiveServiceId)}/secret`);
+        const savedKey = secretData.apiKey;
+        if (cancelled || !savedKey) { setStatus({ state: "idle" }); return; }
+        // Validate via /test
+        const result = await fetchJson<{ ok: boolean; models?: ModelInfo[]; error?: string }>(
+          `/services/${encodeURIComponent(effectiveServiceId)}/test`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiKey: savedKey, apiFormat, stream, ...(isCustom ? { baseUrl: baseUrl.trim() } : {}) }) },
+        );
+        if (cancelled) return;
+        if (result.ok && result.models) {
+          setStatus({ state: "connected", models: result.models });
+        } else {
+          setStatus({ state: "idle" });
+        }
+      } catch {
+        if (!cancelled) setStatus({ state: "idle" });
+      }
+    })();
+    return () => { cancelled = true; };
   }, [svc?.connected, serviceId]);
 
   const resolvedCustomName = persistedCustomName || customName.trim() || "Custom";
