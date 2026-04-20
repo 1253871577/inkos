@@ -2,6 +2,31 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { ArchitectAgent } from "../agents/architect.js";
 import { FoundationReviewerAgent } from "../agents/foundation-reviewer.js";
 import type { ArchitectOutput } from "../agents/architect.js";
+import type { BookConfig } from "../models/book.js";
+import type { LLMClient } from "../llm/provider.js";
+
+// 测试 stub：chat 会被 vi.spyOn 拦截，client.defaults 运行时根本不会被读取。
+// 故意不填 temperature / maxTokens 等数字，避免在测试里留下"推荐配置"的错误
+// 示范（尤其 maxTokens —— 填错会误导后续抄到生产，触发 CLAUDE.md 禁止的
+// maxTokens 回归）。只保留类型要求的身份字段。
+const TEST_CLIENT: LLMClient = {
+  provider: "openai",
+  apiFormat: "chat",
+  stream: false,
+} as unknown as LLMClient;
+
+const buildArchitect = (): ArchitectAgent =>
+  new ArchitectAgent({
+    client: TEST_CLIENT,
+    model: "test-model",
+    projectRoot: process.cwd(),
+  });
+
+const testBook = (): BookConfig => ({
+  id: "test-book", title: "测试书", platform: "qidian", genre: "xuanhuan",
+  status: "active", targetChapters: 50, chapterWordCount: 3000, language: "zh",
+  createdAt: "2026-04-19T00:00:00.000Z", updatedAt: "2026-04-19T00:00:00.000Z",
+});
 
 describe("architect generateFoundation with reviseFrom option", () => {
   afterEach(() => {
@@ -9,22 +34,7 @@ describe("architect generateFoundation with reviseFrom option", () => {
   });
 
   it("injects legacy content into the system prompt when reviseFrom is supplied", async () => {
-    const agent = new ArchitectAgent({
-      client: {
-        provider: "openai",
-        apiFormat: "chat",
-        stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0, maxTokensCap: null,
-          extra: {},
-        },
-      },
-      model: "test-model",
-      projectRoot: process.cwd(),
-    });
-
+    const agent = buildArchitect();
     const chatSpy = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
       .mockResolvedValue({
         content: [
@@ -54,24 +64,15 @@ describe("architect generateFoundation with reviseFrom option", () => {
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       });
 
-    await agent.generateFoundation(
-      {
-        id: "test-book", title: "测试书", platform: "qidian", genre: "xuanhuan",
-        status: "active", targetChapters: 50, chapterWordCount: 3000, language: "zh",
-        createdAt: "2026-04-19T00:00:00.000Z", updatedAt: "2026-04-19T00:00:00.000Z",
+    await agent.generateFoundation(testBook(), undefined, undefined, {
+      reviseFrom: {
+        storyBible: "- 旧世界观：架空唐代\n- 旧主角：林辞",
+        volumeOutline: "## 第一卷\n- 1. 主角登场",
+        bookRules: "## 规则\n- 禁现代词",
+        characterMatrix: "林辞 - 主角",
+        userFeedback: "升级到段落式架构稿",
       },
-      undefined,
-      undefined,
-      {
-        reviseFrom: {
-          storyBible: "- 旧世界观：架空唐代\n- 旧主角：林辞",
-          volumeOutline: "## 第一卷\n- 1. 主角登场",
-          bookRules: "## 规则\n- 禁现代词",
-          characterMatrix: "林辞 - 主角",
-          userFeedback: "升级到段落式架构稿",
-        },
-      },
-    );
+    });
 
     const systemMsg = (chatSpy.mock.calls[0]?.[0] as Array<{ role: string; content: string }>)[0]!;
     expect(systemMsg.content).toContain("把一本已有书的架构稿从条目式升级");
@@ -80,22 +81,7 @@ describe("architect generateFoundation with reviseFrom option", () => {
   });
 
   it("does not inject revisePrompt when reviseFrom is absent", async () => {
-    const agent = new ArchitectAgent({
-      client: {
-        provider: "openai",
-        apiFormat: "chat",
-        stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0, maxTokensCap: null,
-          extra: {},
-        },
-      },
-      model: "test-model",
-      projectRoot: process.cwd(),
-    });
-
+    const agent = buildArchitect();
     const chatSpy = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
       .mockResolvedValue({
         content: [
@@ -108,11 +94,7 @@ describe("architect generateFoundation with reviseFrom option", () => {
         usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       });
 
-    await agent.generateFoundation({
-      id: "test-book", title: "测试", platform: "qidian", genre: "xuanhuan",
-      status: "active", targetChapters: 50, chapterWordCount: 3000, language: "zh",
-      createdAt: "2026-04-19T00:00:00.000Z", updatedAt: "2026-04-19T00:00:00.000Z",
-    });
+    await agent.generateFoundation(testBook());
 
     const systemMsg = (chatSpy.mock.calls[0]?.[0] as Array<{ role: string; content: string }>)[0]!;
     expect(systemMsg.content).not.toContain("把一本已有书的架构稿从条目式升级");
@@ -163,22 +145,12 @@ describe("pipeline.reviseFoundation", () => {
         passed: true, totalScore: 90, dimensions: [], overallFeedback: "ok",
       } as unknown as Awaited<ReturnType<FoundationReviewerAgent["review"]>>);
 
-      // Minimal config for PipelineRunner
+      // Minimal config for PipelineRunner — 共用 TEST_CLIENT 避免重复。
       const state = new StateManager(root);
       const runner = new PipelineRunner({
         state,
         projectRoot: root,
-        client: {
-          provider: "openai",
-          apiFormat: "chat",
-          stream: false,
-          defaults: {
-            temperature: 0.7,
-            maxTokens: 4096,
-            thinkingBudget: 0, maxTokensCap: null,
-            extra: {},
-          },
-        },
+        client: TEST_CLIENT,
         model: "test-model",
       } as unknown as ConstructorParameters<typeof PipelineRunner>[0]);
 

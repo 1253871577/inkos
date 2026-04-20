@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ArchitectAgent } from "../agents/architect.js";
 import type { BookConfig } from "../models/book.js";
+import type { LLMClient } from "../llm/provider.js";
 
 const ZERO_USAGE = {
   promptTokens: 0,
@@ -708,35 +709,37 @@ describe("ArchitectAgent", () => {
 
   // ---- Phase 5 段落式架构稿专项 ----
 
-  it("generateFoundation parses story_frame / volume_map / roles sections", async () => {
-    const agent = new ArchitectAgent({
+  // 测试 stub：chat 会被 vi.spyOn 拦截，client.defaults 运行时不会被读取。
+  // 故意不填 temperature / maxTokens 等数字——避免在测试里留下"推荐配置"的
+  // 错误示范（maxTokens 填错会误导后续抄到生产，触发 CLAUDE.md 禁止的
+  // maxTokens 回归）。只保留类型要求的身份字段。
+  const buildPhase5Agent = (): ArchitectAgent =>
+    new ArchitectAgent({
       client: {
         provider: "openai",
         apiFormat: "chat",
         stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0, maxTokensCap: null,
-          extra: {},
-        },
-      },
+      } as unknown as LLMClient,
       model: "test-model",
       projectRoot: process.cwd(),
     });
 
-    const book: BookConfig = {
-      id: "phase5-book",
-      title: "测试书",
-      platform: "qidian",
-      genre: "xuanhuan",
-      status: "active",
-      targetChapters: 50,
-      chapterWordCount: 3000,
-      language: "zh",
-      createdAt: "2026-04-19T00:00:00.000Z",
-      updatedAt: "2026-04-19T00:00:00.000Z",
-    };
+  const phase5Book = (): BookConfig => ({
+    id: "phase5-book",
+    title: "测试书",
+    platform: "qidian",
+    genre: "xuanhuan",
+    status: "active",
+    targetChapters: 50,
+    chapterWordCount: 3000,
+    language: "zh",
+    createdAt: "2026-04-19T00:00:00.000Z",
+    updatedAt: "2026-04-19T00:00:00.000Z",
+  });
+
+  it("generateFoundation parses story_frame / volume_map / roles sections", async () => {
+    const agent = buildPhase5Agent();
+    const book = phase5Book();
 
     vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
       .mockResolvedValue({
@@ -796,22 +799,7 @@ describe("ArchitectAgent", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
 
-    const agent = new ArchitectAgent({
-      client: {
-        provider: "openai",
-        apiFormat: "chat",
-        stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0, maxTokensCap: null,
-          extra: {},
-        },
-      },
-      model: "test-model",
-      projectRoot: process.cwd(),
-    });
-
+    const agent = buildPhase5Agent();
     const tmpDir = await mkdtemp(join(tmpdir(), "inkos-arch-test-"));
     try {
       await agent.writeFoundationFiles(tmpDir, {
@@ -846,22 +834,7 @@ describe("ArchitectAgent", () => {
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
 
-    const agent = new ArchitectAgent({
-      client: {
-        provider: "openai",
-        apiFormat: "chat",
-        stream: false,
-        defaults: {
-          temperature: 0.7,
-          maxTokens: 4096,
-          thinkingBudget: 0, maxTokensCap: null,
-          extra: {},
-        },
-      },
-      model: "test-model",
-      projectRoot: process.cwd(),
-    });
-
+    const agent = buildPhase5Agent();
     const tmpDir = await mkdtemp(join(tmpdir(), "inkos-arch-legacy-test-"));
     try {
       await agent.writeFoundationFiles(tmpDir, {
