@@ -2,7 +2,7 @@ import { BaseAgent } from "./base.js";
 import type { BookConfig, FanficMode } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { readGenreProfile } from "./rules-reader.js";
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { renderHookSnapshot } from "../utils/memory-retrieval.js";
 
@@ -507,11 +507,25 @@ Rules:
 - **Do NOT emit rhythm_principles or current_state as separate sections** — rhythm principles live in the last paragraph of volume_map; character initial status goes in roles.Current_State; initial hooks go in pending_hooks (start_chapter=0 rows); environment/era anchors (only when the genre has a real year) are woven into story_frame`;
   }
 
+  /**
+   * Write architect foundation output to disk.
+   *
+   * @param mode
+   *   - "init"（默认）：首次建书。写架构稿 + 初始化所有运行时状态文件
+   *     （current_state / pending_hooks / particle_ledger / subplot_board /
+   *     emotional_arcs）为空模板。
+   *   - "revise"：在已有书上重写架构稿。**只改架构稿相关文件**——outline/ /
+   *     roles/ / 4 个 legacy shim——**完全不动运行时状态文件**。这和
+   *     context-transform 注入给 LLM 的 upgrade hint 承诺"只改架构稿不动已写
+   *     章节"一致；如果在 revise 模式下触动运行时文件，会把 consolidator 累积
+   *     的章节状态、伏笔推进、资源账本等全部重置。
+   */
   async writeFoundationFiles(
     bookDir: string,
     output: ArchitectOutput,
     numericalSystem: boolean = true,
     language: "zh" | "en" = "zh",
+    mode: "init" | "revise" = "init",
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     const outlineDir = join(storyDir, "outline");
@@ -559,6 +573,17 @@ Rules:
         writes.push(writeFile(join(outlineDir, rhythmFileName), rhythmPrinciples, "utf-8"));
       }
 
+      // revise 模式下先清空旧 role 文件，再写本次输出——避免改名/删除/合并角色
+      // 后的旧卡片残留被 readRoleCards 当作有效角色继续注入（见 Bug 3）。
+      // 备份由上游 runner.reviseFoundation 在调用前完成，这里可以安全清空。
+      // init 模式下目录本来就是空的，不需要清。
+      if (mode === "revise") {
+        await rm(rolesMajorDir, { recursive: true, force: true });
+        await rm(rolesMinorDir, { recursive: true, force: true });
+        await mkdir(rolesMajorDir, { recursive: true });
+        await mkdir(rolesMinorDir, { recursive: true });
+      }
+
       // 一人一卡
       for (const role of roles) {
         const targetDir = role.tier === "major" ? rolesMajorDir : rolesMinorDir;
@@ -602,41 +627,47 @@ Rules:
       ));
     }
 
-    // current_state.md — Phase 5 下 architect 不再产出结构化初始状态，给个占位 seed，
-    // consolidator 运行时每章追加。如果 output 里带了内容（legacy 输出或 reviser 生成），
-    // 直接用。
-    const currentStateSeed = output.currentState?.trim()
-      ? output.currentState
-      : (language === "en"
-          ? "# Current State\n\n> Seeded at book creation. Runtime state is appended by the consolidator after each chapter. Initial per-character state lives in roles/*.Current_State; load-bearing initial world facts live in pending_hooks rows with start_chapter=0.\n"
-          : "# 当前状态\n\n> 建书时占位。运行时每章之后由 consolidator 追加最新状态。每个角色的初始状态详见 roles/*.当前现状；承重的初始世界设定见 pending_hooks 里 startChapter=0 的行。\n");
-    writes.push(writeFile(join(storyDir, "current_state.md"), currentStateSeed, "utf-8"));
-    writes.push(writeFile(join(storyDir, "pending_hooks.md"), output.pendingHooks, "utf-8"));
+    // 运行时状态文件——**只在 init 模式写**。revise 模式下这些文件已经存在且
+    // 被 consolidator 累积了章节状态（伏笔进度、角色位置、资源账本、情感曲线
+    // 等），重写会把已写章节的真实状态全部清零，违反 context-transform 里给
+    // LLM 的承诺"升级只改架构稿，不动已写的章节"（见 Bug 1）。
+    if (mode === "init") {
+      // current_state.md — 架构师不再产出结构化初始状态，给占位 seed；运行时由
+      // consolidator 每章追加。如果 output 里带了内容（legacy 输出或 reviser
+      // 生成），直接用。
+      const currentStateSeed = output.currentState?.trim()
+        ? output.currentState
+        : (language === "en"
+            ? "# Current State\n\n> Seeded at book creation. Runtime state is appended by the consolidator after each chapter. Initial per-character state lives in roles/*.Current_State; load-bearing initial world facts live in pending_hooks rows with start_chapter=0.\n"
+            : "# 当前状态\n\n> 建书时占位。运行时每章之后由 consolidator 追加最新状态。每个角色的初始状态详见 roles/*.当前现状；承重的初始世界设定见 pending_hooks 里 startChapter=0 的行。\n");
+      writes.push(writeFile(join(storyDir, "current_state.md"), currentStateSeed, "utf-8"));
+      writes.push(writeFile(join(storyDir, "pending_hooks.md"), output.pendingHooks, "utf-8"));
 
-    // 运行时 append log 文件，下游 state-validator / consolidator 依赖这些存在。
-    if (numericalSystem) {
+      // 运行时 append log 文件，下游 state-validator / consolidator 依赖这些存在。
+      if (numericalSystem) {
+        writes.push(writeFile(
+          join(storyDir, "particle_ledger.md"),
+          language === "en"
+            ? "# Resource Ledger\n\n| Chapter | Opening Value | Source | Integrity | Delta | Closing Value | Evidence |\n| --- | --- | --- | --- | --- | --- | --- |\n| 0 | 0 | Initialization | - | 0 | 0 | Initial book state |\n"
+            : "# 资源账本\n\n| 章节 | 期初值 | 来源 | 完整度 | 增量 | 期末值 | 依据 |\n|------|--------|------|--------|------|--------|------|\n| 0 | 0 | 初始化 | - | 0 | 0 | 开书初始 |\n",
+          "utf-8",
+        ));
+      }
       writes.push(writeFile(
-        join(storyDir, "particle_ledger.md"),
+        join(storyDir, "subplot_board.md"),
         language === "en"
-          ? "# Resource Ledger\n\n| Chapter | Opening Value | Source | Integrity | Delta | Closing Value | Evidence |\n| --- | --- | --- | --- | --- | --- | --- |\n| 0 | 0 | Initialization | - | 0 | 0 | Initial book state |\n"
-          : "# 资源账本\n\n| 章节 | 期初值 | 来源 | 完整度 | 增量 | 期末值 | 依据 |\n|------|--------|------|--------|------|--------|------|\n| 0 | 0 | 初始化 | - | 0 | 0 | 开书初始 |\n",
+          ? "# Subplot Board\n\n| Subplot ID | Subplot | Related Characters | Start Chapter | Last Active Chapter | Chapters Since | Status | Progress Summary | Payoff ETA |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+          : "# 支线进度板\n\n| 支线ID | 支线名 | 相关角色 | 起始章 | 最近活跃章 | 距今章数 | 状态 | 进度概述 | 回收ETA |\n|--------|--------|----------|--------|------------|----------|------|----------|---------|\n",
+        "utf-8",
+      ));
+      writes.push(writeFile(
+        join(storyDir, "emotional_arcs.md"),
+        language === "en"
+          ? "# Emotional Arcs\n\n| Character | Chapter | Emotional State | Trigger Event | Intensity (1-10) | Arc Direction |\n| --- | --- | --- | --- | --- | --- |\n"
+          : "# 情感弧线\n\n| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |\n|------|------|----------|----------|------------|----------|\n",
         "utf-8",
       ));
     }
-    writes.push(writeFile(
-      join(storyDir, "subplot_board.md"),
-      language === "en"
-        ? "# Subplot Board\n\n| Subplot ID | Subplot | Related Characters | Start Chapter | Last Active Chapter | Chapters Since | Status | Progress Summary | Payoff ETA |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-        : "# 支线进度板\n\n| 支线ID | 支线名 | 相关角色 | 起始章 | 最近活跃章 | 距今章数 | 状态 | 进度概述 | 回收ETA |\n|--------|--------|----------|--------|------------|----------|------|----------|---------|\n",
-      "utf-8",
-    ));
-    writes.push(writeFile(
-      join(storyDir, "emotional_arcs.md"),
-      language === "en"
-        ? "# Emotional Arcs\n\n| Character | Chapter | Emotional State | Trigger Event | Intensity (1-10) | Arc Direction |\n| --- | --- | --- | --- | --- | --- |\n"
-        : "# 情感弧线\n\n| 角色 | 章节 | 情绪状态 | 触发事件 | 强度(1-10) | 弧线方向 |\n|------|------|----------|----------|------------|----------|\n",
-      "utf-8",
-    ));
 
     await Promise.all(writes);
   }
