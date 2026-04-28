@@ -14,9 +14,12 @@ import {
   deserializeMessages,
   extractErrorMessage,
   mergeSessionIds,
+  stopLastAssistantMessage,
   updateSession,
   upsertSessionSummary,
 } from "./runtime";
+
+const STOP_NOTE = "已停止生成";
 
 export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions> = (set, get) => ({
   activateSession: (sessionId) =>
@@ -201,6 +204,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   deleteSession: async (sessionId) => {
     const session = get().sessions[sessionId];
     session?.stream?.close();
+    session?.requestController?.abort();
     // 草稿会话还没写到磁盘，跳过 DELETE 请求避免后端返回 404
     if (session && !session.isDraft) {
       try {
@@ -231,6 +235,25 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         activeSessionId,
       };
     });
+  },
+
+  stopMessage: async (sessionId) => {
+    const session = get().sessions[sessionId];
+    if (!session?.isStreaming) return;
+
+    session.stream?.close();
+
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, (runtime) => ({
+        stream: null,
+        stopRequested: true,
+        lastError: null,
+        messages: stopLastAssistantMessage(runtime.messages, STOP_NOTE),
+      })),
+    }));
+
+    session.requestController?.abort();
+    void fetchJson(`/agent/${encodeURIComponent(sessionId)}/stop`, { method: "POST" }).catch(() => {});
   },
 
   loadSessionDetail: async (sessionId) => {
@@ -321,13 +344,16 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
     const instruction = activeBookId ? trimmed : `/new ${trimmed}`;
     const streamTs = Date.now() + 1;
+    const requestController = new AbortController();
 
     set((state) => ({
       input: "",
       activeSessionId: sessionId,
       sessions: updateSession(state.sessions, sessionId, () => ({
         isStreaming: true,
+        stopRequested: false,
         lastError: null,
+        requestController,
       })),
     }));
 
@@ -350,12 +376,14 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
         }),
+        signal: requestController.signal,
       });
 
       streamEs.close();
 
       const finalContent = data.details?.draftRaw || data.response || "";
       const toolCall = data.details?.toolCall ?? undefined;
+      const wasStopped = data.stopped === true || get().sessions[sessionId]?.stopRequested === true;
       const hasStream = Boolean(
         get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
       );
@@ -385,7 +413,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
             })),
           }));
         }
-      } else {
+      } else if (!wasStopped) {
         const emptyMessage = "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。";
         if (hasStream) {
           get().replaceStreamWithError(sessionId, streamTs, emptyMessage);
@@ -395,6 +423,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       }
     } catch (error) {
       streamEs.close();
+      const isAbortError = error instanceof Error && error.name === "AbortError";
+      if (isAbortError && get().sessions[sessionId]?.stopRequested) {
+        return;
+      }
       const errorMessage = error instanceof Error ? error.message : String(error);
       const hasStream = Boolean(
         get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
@@ -409,6 +441,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         sessions: updateSession(state.sessions, sessionId, (runtime) => ({
           isStreaming: false,
           stream: runtime.stream === streamEs ? null : runtime.stream,
+          requestController: runtime.requestController === requestController ? null : runtime.requestController,
+          stopRequested: runtime.requestController === requestController ? false : runtime.stopRequested,
         })),
       }));
     }

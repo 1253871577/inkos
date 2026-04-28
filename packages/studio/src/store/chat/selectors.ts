@@ -7,6 +7,7 @@ export const chatSelectors = {
   activeMessages: (s: ChatState) =>
     (s.activeSessionId ? s.sessions[s.activeSessionId]?.messages : undefined) ?? EMPTY_MESSAGES,
   isActiveSessionStreaming: (s: ChatState) => Boolean(s.activeSessionId && s.sessions[s.activeSessionId]?.isStreaming),
+  isActiveSessionStopping: (s: ChatState) => Boolean(s.activeSessionId && s.sessions[s.activeSessionId]?.stopRequested),
   isEmpty: (s: ChatState) =>
     ((s.activeSessionId ? s.sessions[s.activeSessionId]?.messages.length : 0) ?? 0) === 0
     && !Boolean(s.activeSessionId && s.sessions[s.activeSessionId]?.isStreaming),

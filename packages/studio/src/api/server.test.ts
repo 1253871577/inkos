@@ -23,6 +23,7 @@ const createInteractionToolsFromDepsMock = vi.fn(() => ({}));
 const loadProjectSessionMock = vi.fn();
 const resolveSessionActiveBookMock = vi.fn();
 const runAgentSessionMock = vi.fn();
+const abortAgentSessionMock = vi.fn();
 const createAndPersistBookSessionMock = vi.fn();
 const loadBookSessionMock = vi.fn();
 const persistBookSessionMock = vi.fn();
@@ -206,6 +207,7 @@ vi.mock("@actalk/inkos-core", () => {
     loadProjectSession: loadProjectSessionMock,
     resolveSessionActiveBook: resolveSessionActiveBookMock,
     runAgentSession: runAgentSessionMock,
+    abortAgentSession: abortAgentSessionMock,
     buildAgentSystemPrompt: vi.fn(() => "You are helpful."),
     createAndPersistBookSession: createAndPersistBookSessionMock,
     loadBookSession: loadBookSessionMock,
@@ -378,6 +380,7 @@ describe("createStudioServer daemon lifecycle", () => {
     rollbackToChapterMock.mockResolvedValue([]);
     pipelineConfigs.length = 0;
     runAgentSessionMock.mockReset();
+    abortAgentSessionMock.mockReset();
     createAndPersistBookSessionMock.mockReset();
     loadBookSessionMock.mockReset();
     persistBookSessionMock.mockReset();
@@ -424,6 +427,7 @@ describe("createStudioServer daemon lifecycle", () => {
       responseText: "Agent response.",
       messages: [],
     });
+    abortAgentSessionMock.mockReturnValue(false);
     loadSecretsMock.mockResolvedValue({ services: {} });
     saveSecretsMock.mockResolvedValue(undefined);
     getServiceApiKeyMock.mockResolvedValue(undefined);
@@ -1766,6 +1770,21 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
+  it("stops an in-flight agent session via /api/v1/agent/:sessionId/stop", async () => {
+    abortAgentSessionMock.mockReturnValue(true);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent/agent-session-1/stop", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    expect(abortAgentSessionMock).toHaveBeenCalledWith("agent-session-1");
+    await expect(response.json()).resolves.toEqual({ ok: true, stopped: true });
+  });
+
   it("does not override system file read policy from Studio agent API by default", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -1939,6 +1958,31 @@ describe("createStudioServer daemon lifecycle", () => {
         code: "AGENT_ERROR",
         message: "boom",
       },
+    });
+  });
+
+  it("returns a stopped response when the agent turn was aborted", async () => {
+    runAgentSessionMock.mockResolvedValueOnce({
+      responseText: "",
+      errorMessage: "Request aborted",
+      messages: [{ role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request aborted" }],
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "continue", activeBookId: "demo-book", sessionId: "agent-session-1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(chatCompletionMock).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      response: "",
+      stopped: true,
+      session: { sessionId: "agent-session-1", activeBookId: "demo-book" },
     });
   });
 

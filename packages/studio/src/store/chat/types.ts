@@ -68,6 +68,7 @@ export interface SessionSummary {
 
 export interface AgentResponse {
   readonly response?: string;
+  readonly stopped?: boolean;
   readonly error?: string | { code?: string; message?: string };
   readonly details?: {
     readonly draftRaw?: string;
@@ -109,7 +110,9 @@ export interface SessionRuntime {
   readonly title: string | null;
   readonly messages: ReadonlyArray<Message>;
   readonly stream: EventSource | null;
+  readonly requestController: AbortController | null;
   readonly isStreaming: boolean;
+  readonly stopRequested: boolean;
   readonly lastError: string | null;
   // 仅前端存在、尚未持久化到磁盘的草稿会话。发送第一条消息时才调 POST /sessions 把它落盘。
   readonly isDraft: boolean;
@@ -151,6 +154,7 @@ export interface MessageActions {
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   loadSessionDetail: (sessionId: string) => Promise<void>;
+  stopMessage: (sessionId: string) => Promise<void>;
   sendMessage: (sessionId: string, text: string, activeBookId?: string) => Promise<void>;
   setSelectedModel: (model: string, service: string) => void;
 }

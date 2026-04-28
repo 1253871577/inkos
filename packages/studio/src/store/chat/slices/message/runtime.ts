@@ -137,10 +137,65 @@ export function createSessionRuntime(input: {
     title: input.title,
     messages: input.messages ?? [],
     stream: null,
+    requestController: null,
     isStreaming: false,
+    stopRequested: false,
     lastError: null,
     isDraft: input.isDraft ?? false,
   };
+}
+
+export function stopLastAssistantMessage(
+  messages: ReadonlyArray<Message>,
+  note: string,
+): ReadonlyArray<Message> {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "assistant") {
+    return messages;
+  }
+
+  if (!last.parts?.length) {
+    const toolExecutions = last.toolExecutions?.map((execution) =>
+      execution.status === "running" || execution.status === "processing"
+        ? {
+            ...execution,
+            status: "error" as const,
+            error: execution.error ?? note,
+            completedAt: execution.completedAt ?? Date.now(),
+          }
+        : execution,
+    );
+    return replaceLast(messages, {
+      ...last,
+      thinkingStreaming: false,
+      ...(toolExecutions ? { toolExecutions } : {}),
+    });
+  }
+
+  const parts: MessagePart[] = last.parts.map((part) => {
+    if (part.type === "thinking") {
+      return { ...part, streaming: false };
+    }
+    if (part.type === "tool" && (part.execution.status === "running" || part.execution.status === "processing")) {
+      return {
+        type: "tool",
+        execution: {
+          ...part.execution,
+          status: "error",
+          error: part.execution.error ?? note,
+          completedAt: part.execution.completedAt ?? Date.now(),
+        },
+      };
+    }
+    return part;
+  });
+
+  const flat = deriveFlat(parts);
+  return replaceLast(messages, {
+    ...last,
+    ...flat,
+    parts,
+  });
 }
 
 export function deserializeMessages(

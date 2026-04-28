@@ -19,11 +19,11 @@ import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
 import { ToolExecutionSteps } from "../components/chat/ToolExecutionSteps";
 import {
-  Loader2,
   BotMessageSquare,
   ArrowUp,
   ChevronDown,
   Check,
+  Square,
 } from "lucide-react";
 import { Shimmer } from "../components/ai-elements/shimmer";
 import {
@@ -61,11 +61,13 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const input = useChatStore((s) => s.input);
   const loading = useChatStore(chatSelectors.isActiveSessionStreaming);
+  const stopping = useChatStore(chatSelectors.isActiveSessionStopping);
   const selectedModel = useChatStore((s) => s.selectedModel);
   const selectedService = useChatStore((s) => s.selectedService);
   // -- Store actions --
   const setInput = useChatStore((s) => s.setInput);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const stopMessage = useChatStore((s) => s.stopMessage);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
   const loadSessionList = useChatStore((s) => s.loadSessionList);
   const createSession = useChatStore((s) => s.createSession);
@@ -343,11 +345,25 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                 />
                 <button
                   type="button"
-                  onClick={() => onSend(input)}
-                  disabled={!input.trim() || loading || !activeSessionId}
-                  className="w-8 h-8 rounded-lg bg-primary text-primary-foreground flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition-all disabled:opacity-20 disabled:scale-100 shadow-sm shadow-primary/20"
+                  onClick={() => {
+                    if (loading) {
+                      if (activeSessionId) {
+                        void stopMessage(activeSessionId);
+                      }
+                      return;
+                    }
+                    onSend(input);
+                  }}
+                  disabled={loading ? stopping || !activeSessionId : !input.trim() || !activeSessionId}
+                  title={loading ? (isZh ? "停止生成" : "Stop generating") : (isZh ? "发送" : "Send")}
+                  aria-label={loading ? (isZh ? "停止生成" : "Stop generating") : (isZh ? "发送消息" : "Send message")}
+                  className={`w-8 h-8 rounded-lg text-primary-foreground flex items-center justify-center shrink-0 transition-all disabled:opacity-40 disabled:scale-100 shadow-sm ${
+                    loading
+                      ? "bg-destructive hover:scale-105 active:scale-95 shadow-destructive/20"
+                      : "bg-primary hover:scale-105 active:scale-95 shadow-primary/20"
+                  }`}
                 >
-                  {loading ? <Loader2 size={14} className="animate-spin" /> : <ArrowUp size={14} strokeWidth={2.5} />}
+                  {loading ? <Square size={12} fill="currentColor" strokeWidth={2.4} /> : <ArrowUp size={14} strokeWidth={2.5} />}
                 </button>
               </div>
               <div className="flex items-center gap-2 px-3 pb-2 border-t border-border/20 pt-1.5">

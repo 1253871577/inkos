@@ -708,6 +708,20 @@ async function runAgentSessionUnlocked(
 // Cache management
 // ---------------------------------------------------------------------------
 
+/** Abort any in-flight cached Agent session matching the given sessionId. */
+export function abortAgentSession(sessionId: string): boolean {
+  let aborted = false;
+  for (const entry of agentCache.values()) {
+    if (entry.sessionId !== sessionId) continue;
+    const signal = entry.agent.signal;
+    if (!signal || signal.aborted) continue;
+    entry.lastActive = Date.now();
+    entry.agent.abort();
+    aborted = true;
+  }
+  return aborted;
+}
+
 /** Manually evict a cached Agent session. */
 export function evictAgentCache(sessionId: string): boolean {
   let deleted = agentCache.delete(sessionId);

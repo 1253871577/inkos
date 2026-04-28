@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
+import * as InkosCore from "@actalk/inkos-core";
 import {
   StateManager,
   PipelineRunner,
@@ -73,6 +74,10 @@ const AGENT_LABELS: Record<string, string> = {
 const TOOL_LABELS: Record<string, string> = {
   read: "读取文件", edit: "编辑文件", grep: "搜索", ls: "列目录",
 };
+
+const abortAgentSession = Object.prototype.hasOwnProperty.call(InkosCore, "abortAgentSession")
+  ? ((InkosCore as typeof InkosCore & { abortAgentSession?: (sessionId: string) => boolean }).abortAgentSession ?? (() => false))
+  : (() => false);
 
 function resolveToolLabel(tool: string, agent?: string): string {
   if (tool === "sub_agent" && agent) return AGENT_LABELS[agent] ?? agent;
@@ -236,6 +241,19 @@ function resolveCreatedBookIdFromToolExecs(execs: ReadonlyArray<CollectedToolExe
     if (fromArgs) return fromArgs;
   }
   return null;
+}
+
+function lastAssistantStopReason(messages: ReadonlyArray<unknown> | undefined): string | undefined {
+  if (!messages) return undefined;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || typeof message !== "object") continue;
+    const role = (message as { role?: unknown }).role;
+    if (role !== "assistant") continue;
+    const stopReason = (message as { stopReason?: unknown }).stopReason;
+    return typeof stopReason === "string" ? stopReason : undefined;
+  }
+  return undefined;
 }
 
 async function loadStudioBookListSummary(
@@ -1637,6 +1655,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ ok: true });
   });
 
+  app.post("/api/v1/agent/:sessionId/stop", async (c) => {
+    const sessionId = c.req.param("sessionId");
+    const stopped = abortAgentSession(sessionId);
+    if (stopped) {
+      broadcast("agent:stopped", { sessionId });
+    }
+    return c.json({ ok: true, stopped });
+  });
+
   app.post("/api/v1/agent", async (c) => {
     const { instruction, activeBookId, sessionId: reqSessionId, model: reqModel, service: reqService } = await c.req.json<{
       instruction: string;
@@ -1658,6 +1685,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
 
     broadcast("agent:start", { instruction, activeBookId, sessionId });
+
+    let detachRequestAbort: (() => void) | undefined;
+    const requestSignal = c.req.raw.signal;
+    if (requestSignal?.aborted) {
+      abortAgentSession(sessionId);
+    } else if (requestSignal) {
+      const forwardAbort = () => {
+        abortAgentSession(sessionId);
+      };
+      requestSignal.addEventListener("abort", forwardAbort, { once: true });
+      detachRequestAbort = () => {
+        requestSignal.removeEventListener("abort", forwardAbort);
+      };
+    }
 
     try {
       // Load config + create LLM client (pipeline created after model resolution)
@@ -1895,6 +1936,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         },
         instruction,
       );
+      const wasStopped = lastAssistantStopReason(result.messages) === "aborted";
 
       let broadcastedCreatedBookId: string | null = null;
       const finalizeCreatedBook = async (): Promise<string | null> => {
@@ -1924,6 +1966,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         broadcastedCreatedBookId = createdBookId;
         return createdBookId;
       };
+
+      if (wasStopped) {
+        await refreshBookSessionFromTranscript();
+        const createdBookId = await finalizeCreatedBook();
+        broadcast("agent:stopped", { instruction, activeBookId, sessionId: bookSession.sessionId });
+        return c.json({
+          response: result.responseText,
+          stopped: true,
+          session: {
+            sessionId: bookSession.sessionId,
+            ...(createdBookId ? { activeBookId: createdBookId } : {}),
+            ...(!createdBookId && bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
+          },
+        });
+      }
 
       if (!result.responseText) {
         if (result.errorMessage) {
@@ -2058,6 +2115,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         { error: { code: "AGENT_ERROR", message: msg } },
         500,
       );
+    } finally {
+      detachRequestAbort?.();
     }
   });
 
